@@ -200,8 +200,9 @@ function d_integrand(u, fit, y)
     vec(D)
 end
 
+chunk(xs, n) = collect(Iterators.partition(xs, ceil(Int, length(xs)/n)))
 
-function conditional_on_obs!(s::Sample, fit::PhaseType, Bs::Array{Threads.Atomic{Float64}}, Zs::Array{Threads.Atomic{Float64}}, Ns::Array{Threads.Atomic{Float64}})
+function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Float64}, Zs_g::AbstractArray{Float64}, Ns_g::AbstractArray{Float64})
     # Setup initial conditions.
     p = fit.p
     u0 = zeros(p*p)
@@ -210,57 +211,91 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs::Array{Threads.Atomic
     prob = ODEProblem(ode_observations!, u0, (0.0, maximum(s.obs)), fit)
     sol = solve(prob, Tsit5())
 
-    Threads.@threads for k = 1:length(s.obs)
-        weight = s.obsweight[k]
+    Bs_a = Array{Threads.Atomic{Float64}}(undef, p); Zs_a = Array{Threads.Atomic{Float64}}(undef, p); Ns_a = Array{Threads.Atomic{Float64}}(undef, p, p+1)
 
-        expTy = exp(fit.T * s.obs[k])
-        a = transpose(fit.π' * expTy)
-        b = expTy * fit.t
+    for i = 1:size(Bs_a)[1]
+        Bs_a[i] = Threads.Atomic{Float64}(Bs_g[i])
+    end
 
-        u = sol(s.obs[k])
-        C = reshape(u, p, p)
+    for i = 1:size(Zs_a)[1]
+        Zs_a[i] = Threads.Atomic{Float64}(Zs_g[i])
+    end
 
+    maxi, maxj = size(Ns_a)
 
-        if minimum(C) < 0
-            println("C is less than 0... ", s.obs[k], ", ", maximum(C))
-            (C,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
-            C = reshape(C, p, p)
-        end
-
-        denom = fit.π' * b
-
-        if denom == 0
-            println("Ignoring observation with b = 0")
-        else
-            Bs_add = weight * (fit.π .* b) / denom
-            Zs_add = weight * diag(C) / denom
-            Ns_add = weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
-            Ns_add_last = weight * (fit.t .* a) / denom
-
-
-            for i = 1:size(Bs)[1]
-                Threads.atomic_add!(Bs[i], Bs_add[i])
-            end
-
-            for i = 1:size(Zs)[1]
-                Threads.atomic_add!(Zs[i], Zs_add[i])
-            end
-
-            maxi, maxj = size(Ns)
-
-            for i = 1:maxi
-                for j = 1:(maxj - 1)
-                    Threads.atomic_add!(Ns[i,j], Ns_add[i,j])
-                end
-                Threads.atomic_add!(Ns[i,p+1], Ns_add_last[i])
-            end
-
-            #Bs[:] = Bs[:] + weight * (fit.π .* b) / denom
-            #Zs[:] = Zs[:] + weight * diag(C) / denom
-            #Ns[:,1:p] = Ns[:,1:p] + weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
-            #Ns[:,p+1] = Ns[:,end] + weight * (fit.t .* a) / denom
+    for i = 1:maxi
+        for j = 1:maxj
+            Ns_a[i,j] = Threads.Atomic{Float64}(Ns_g[i,j])
         end
     end
+
+    Threads.@threads for cc = chunk(1:length(s.obs), Threads.nthreads())
+        Bs = zeros(p); Zs = zeros(p); Ns = zeros(p, p+1)
+
+        for k in cc
+
+            weight = s.obsweight[k]
+
+            expTy = exp(fit.T * s.obs[k])
+            a = transpose(fit.π' * expTy)
+            b = expTy * fit.t
+
+            u = sol(s.obs[k])
+            C = reshape(u, p, p)
+
+
+            if minimum(C) < 0
+                println("C is less than 0... ", s.obs[k], ", ", maximum(C))
+                (C,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
+                C = reshape(C, p, p)
+            end
+
+            denom = fit.π' * b
+
+            if denom == 0
+                println("Ignoring observation with b = 0")
+            else
+                Bs[:] = Bs[:] + weight * (fit.π .* b) / denom
+                Zs[:] = Zs[:] + weight * diag(C) / denom
+                Ns[:,1:p] = Ns[:,1:p] + weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
+                Ns[:,p+1] = Ns[:,end] + weight * (fit.t .* a) / denom
+            end
+
+        for i = 1:size(Bs_a)[1]
+            Threads.atomic_add!(Bs_a[i], Bs[i])
+        end
+
+        for i = 1:size(Zs_a)[1]
+            Threads.atomic_add!(Zs_a[i], Zs[i])
+        end
+
+        maxi, maxj = size(Ns_a)
+
+        for i = 1:maxi
+            for j = 1:(maxj - 1)
+                Threads.atomic_add!(Ns_a[i,j], Ns[i,j])
+            end
+            Threads.atomic_add!(Ns_a[i,p+1], Ns[i])
+        end
+        end
+    end
+
+    for i = 1:size(Bs_a)[1]
+        Bs_g[i] += Bs_a[i][]
+    end
+
+    for i = 1:size(Zs_a)[1]
+        Zs_g[i] += Zs_a[i][]
+    end
+
+    maxi, maxj = size(Ns_a)
+
+    for i = 1:maxi
+        for j = 1:maxj
+            Ns_g[i,j] += Ns_a[i,j][]
+        end
+    end
+
 end
 
 function conv_int_unif(r, P, fit, t, beta, alpha)
@@ -377,50 +412,17 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
         ##  The expectation step!
         Bs = zeros(p); Zs = zeros(p); Ns = zeros(p, p+1)
-        Bs_a = Array{Threads.Atomic{Float64}}(undef, p); Zs_a = Array{Threads.Atomic{Float64}}(undef, p); Ns_a = Array{Threads.Atomic{Float64}}(undef, p, p+1)
-
-        for i = 1:size(Bs_a)[1]
-            Bs_a[i] = Threads.Atomic{Float64}(0)
-        end
-
-        for i = 1:size(Zs_a)[1]
-            Zs_a[i] = Threads.Atomic{Float64}(0)
-        end
-
-        maxi, maxj = size(Ns_a)
-
-        for i = 1:maxi
-            for j = 1:maxj
-                Ns_a[i,j] = Threads.Atomic{Float64}(0)
-            end
-        end
 
         # TODO: set to 0
 
         if length(s.obs) > 0
-            conditional_on_obs!(s, fit, Bs_a, Zs_a, Ns_a)
+            conditional_on_obs!(s, fit, Bs, Zs, Ns)
         end
 
         if length(s.cens) > 0 || length(s.int) > 0
             conditional_on_cens!(s, fit, Bs, Zs, Ns)
         end
 
-
-        for i = 1:size(Bs_a)[1]
-            Bs[i] += Bs_a[i][]
-        end
-
-        for i = 1:size(Zs_a)[1]
-            Zs[i] += Zs_a[i][]
-        end
-
-        maxi, maxj = size(Ns_a)
-
-        for i = 1:maxi
-            for j = 1:maxj
-                Ns[i,j] += Ns_a[i,j][]
-            end
-        end
 
         ## The maximisation step!
         π_next = max.(Bs ./ sumOfWeights, 0)
