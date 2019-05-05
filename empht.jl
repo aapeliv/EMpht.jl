@@ -178,6 +178,17 @@ function save_progress(name::String, s::Sample, fit::PhaseType, plotDens::Bool, 
     end
 end
 
+function create_c_integrand(fit, y)
+    return function (u)
+        first = fit.π' * exp(fit.T * u)
+        second = exp(fit.T * (y-u)) * fit.t
+        # Construct the matrix of integrands using outer product
+        # then reshape it to a vector.
+        C = second * first
+        return vec(C)
+    end
+end
+
 function d_integrand(u, fit, y)
     # Compute the two vector terms in the integrand
     first = fit.π' * exp(fit.T * u)
@@ -209,11 +220,23 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs::AbstractArray{Float6
         u = sol(s.obs[k])
         C = reshape(u, p, p)
 
+
+        if minimum(C) < 0
+            println("C is less than 0... ", s.obs[k], ", ", maximum(C))
+            (C,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
+            C = reshape(C, p, p)
+        end
+
         denom = fit.π' * b
-        Bs[:] = Bs[:] + weight * (fit.π .* b) / denom
-        Zs[:] = Zs[:] + weight * diag(C) / denom
-        Ns[:,1:p] = Ns[:,1:p] + weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
-        Ns[:,p+1] = Ns[:,end] + weight * (fit.t .* a) / denom
+
+        if denom == 0
+            println("Ignoring a b = 0 observation")
+        else
+            Bs[:] = Bs[:] + weight * (fit.π .* b) / denom
+            Zs[:] = Zs[:] + weight * diag(C) / denom
+            Ns[:,1:p] = Ns[:,1:p] + weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
+            Ns[:,p+1] = Ns[:,end] + weight * (fit.t .* a) / denom
+        end
     end
 end
 
@@ -326,6 +349,8 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
     numPlots = 0
     for iter = 1:num_iter
+
+        println(iter)
 
         ##  The expectation step!
         Bs = zeros(p); Zs = zeros(p); Ns = zeros(p, p+1)
