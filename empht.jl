@@ -9,7 +9,7 @@ using Statistics
 
 include("phasetype.jl");
 
-BLAS.set_num_threads(1)
+BLAS.set_num_threads(16)
 
 # Definition of a sample which we fit the phase-type distribution to.
 struct Sample
@@ -201,7 +201,7 @@ function d_integrand(u, fit, y)
 end
 
 
-function conditional_on_obs!(s::Sample, fit::PhaseType, Bs::AbstractArray{Float64}, Zs::AbstractArray{Float64}, Ns::AbstractArray{Float64})
+function conditional_on_obs!(s::Sample, fit::PhaseType, Bs::Array{Threads.Atomic{Float64}}, Zs::Array{Threads.Atomic{Float64}}, Ns::Array{Threads.Atomic{Float64}})
     # Setup initial conditions.
     p = fit.p
     u0 = zeros(p*p)
@@ -210,7 +210,7 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs::AbstractArray{Float6
     prob = ODEProblem(ode_observations!, u0, (0.0, maximum(s.obs)), fit)
     sol = solve(prob, Tsit5())
 
-    for k = 1:length(s.obs)
+    Threads.@threads for k = 1:length(s.obs)
         weight = s.obsweight[k]
 
         expTy = exp(fit.T * s.obs[k])
@@ -230,12 +230,35 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs::AbstractArray{Float6
         denom = fit.π' * b
 
         if denom == 0
-            println("Ignoring a b = 0 observation")
+            println("Ignoring observation with b = 0")
         else
-            Bs[:] = Bs[:] + weight * (fit.π .* b) / denom
-            Zs[:] = Zs[:] + weight * diag(C) / denom
-            Ns[:,1:p] = Ns[:,1:p] + weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
-            Ns[:,p+1] = Ns[:,end] + weight * (fit.t .* a) / denom
+            Bs_add = weight * (fit.π .* b) / denom
+            Zs_add = weight * diag(C) / denom
+            Ns_add = weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
+            Ns_add_last = weight * (fit.t .* a) / denom
+
+
+            for i = 1:size(Bs)[1]
+                Threads.atomic_add!(Bs[i], Bs_add[i])
+            end
+
+            for i = 1:size(Zs)[1]
+                Threads.atomic_add!(Zs[i], Zs_add[i])
+            end
+
+            maxi, maxj = size(Ns)
+
+            for i = 1:maxi
+                for j = 1:(maxj - 1)
+                    Threads.atomic_add!(Ns[i,j], Ns_add[i,j])
+                end
+                Threads.atomic_add!(Ns[i,p+1], Ns_add_last[i])
+            end
+
+            #Bs[:] = Bs[:] + weight * (fit.π .* b) / denom
+            #Zs[:] = Zs[:] + weight * diag(C) / denom
+            #Ns[:,1:p] = Ns[:,1:p] + weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
+            #Ns[:,p+1] = Ns[:,end] + weight * (fit.t .* a) / denom
         end
     end
 end
@@ -354,13 +377,49 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
         ##  The expectation step!
         Bs = zeros(p); Zs = zeros(p); Ns = zeros(p, p+1)
+        Bs_a = Array{Threads.Atomic{Float64}}(undef, p); Zs_a = Array{Threads.Atomic{Float64}}(undef, p); Ns_a = Array{Threads.Atomic{Float64}}(undef, p, p+1)
+
+        for i = 1:size(Bs_a)[1]
+            Bs_a[i] = Threads.Atomic{Float64}(0)
+        end
+
+        for i = 1:size(Zs_a)[1]
+            Zs_a[i] = Threads.Atomic{Float64}(0)
+        end
+
+        maxi, maxj = size(Ns_a)
+
+        for i = 1:maxi
+            for j = 1:maxj
+                Ns_a[i,j] = Threads.Atomic{Float64}(0)
+            end
+        end
+
+        # TODO: set to 0
 
         if length(s.obs) > 0
-            conditional_on_obs!(s, fit, Bs, Zs, Ns)
+            conditional_on_obs!(s, fit, Bs_a, Zs_a, Ns_a)
         end
 
         if length(s.cens) > 0 || length(s.int) > 0
             conditional_on_cens!(s, fit, Bs, Zs, Ns)
+        end
+
+
+        for i = 1:size(Bs_a)[1]
+            Bs[i] += Bs_a[i][]
+        end
+
+        for i = 1:size(Zs_a)[1]
+            Zs[i] += Zs_a[i][]
+        end
+
+        maxi, maxj = size(Ns_a)
+
+        for i = 1:maxi
+            for j = 1:maxj
+                Ns[i,j] += Ns_a[i,j][]
+            end
         end
 
         ## The maximisation step!
