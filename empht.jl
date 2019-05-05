@@ -158,8 +158,8 @@ function initial_phasetype(name::String, p::Int, ph_structure::String, continueF
             scalefactor = median(s.cens)
         end
 
-        t *= p / scalefactor
-        T *= p / scalefactor
+        t *= p / scalefactor / 10
+        T *= p / scalefactor / 10
     end
 
     PhaseType(π, T)
