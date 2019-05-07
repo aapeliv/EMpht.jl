@@ -9,7 +9,7 @@ using Statistics
 
 include("phasetype.jl");
 
-BLAS.set_num_threads(16)
+BLAS.set_num_threads(1)
 
 # Definition of a sample which we fit the phase-type distribution to.
 struct Sample
@@ -166,12 +166,12 @@ function initial_phasetype(name::String, p::Int, ph_structure::String, continueF
 end
 
 function save_progress(name::String, s::Sample, fit::PhaseType, plotDens::Bool, plotMax::Float64, iter::Integer, start::DateTime, seed::Integer)
-    if fit.p >= 25 || iter % 10 == 0
+    if fit.p >= 3 || iter % 10 == 0
         ll = loglikelihoodcensored(s, fit)
 
         open(string(name, "_$(seed)_loglikelihood.csv"), "a") do f
             mins = (now() - start).value / 1000 / 60
-            write(f, "$ll $(round(mins; digits=4))\n")
+            write(f, "$iter $ll $(round(mins; digits=4))\n")
         end
 
         writedlm(string(name, "_$(seed)_fit.csv"), [fit.π fit.T])
@@ -211,6 +211,8 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
     prob = ODEProblem(ode_observations!, u0, (0.0, maximum(s.obs)), fit)
     sol = solve(prob, Tsit5())
 
+    print(", chunking away...")
+
     Bs_a = Array{Threads.Atomic{Float64}}(undef, p); Zs_a = Array{Threads.Atomic{Float64}}(undef, p); Ns_a = Array{Threads.Atomic{Float64}}(undef, p, p+1)
 
     for i = 1:size(Bs_a)[1]
@@ -229,8 +231,15 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
         end
     end
 
+    probs = Threads.Atomic{Int64}(0)
+
+    print(" done")
+
     Threads.@threads for cc = chunk(1:length(s.obs), Threads.nthreads())
+    #for cc = chunk(1:length(s.obs), Threads.nthreads())
+        #print("x?")
         Bs = zeros(p); Zs = zeros(p); Ns = zeros(p, p+1)
+        #print(" :)")
 
         for k in cc
 
@@ -245,7 +254,8 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
 
 
             if minimum(C) < 0
-                println("C is less than 0... ", s.obs[k], ", ", maximum(C))
+                Threads.atomic_add!(probs, 1)
+                #println("C is less than 0... ", s.obs[k], ", ", maximum(C))
                 (C,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
                 C = reshape(C, p, p)
             end
@@ -253,7 +263,7 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
             denom = fit.π' * b
 
             if denom == 0
-                println("Ignoring observation with b = 0")
+                #println("Ignoring observation with b = 0")
             else
                 Bs[:] = Bs[:] + weight * (fit.π .* b) / denom
                 Zs[:] = Zs[:] + weight * diag(C) / denom
@@ -262,23 +272,33 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
             end
 
         for i = 1:size(Bs_a)[1]
-            Threads.atomic_add!(Bs_a[i], Bs[i])
+            if Bs[i] != 0
+                Threads.atomic_add!(Bs_a[i], Bs[i])
+            end
         end
 
         for i = 1:size(Zs_a)[1]
-            Threads.atomic_add!(Zs_a[i], Zs[i])
+            if Zs[i] != 0
+                Threads.atomic_add!(Zs_a[i], Zs[i])
+            end
         end
 
         maxi, maxj = size(Ns_a)
 
         for i = 1:maxi
             for j = 1:(maxj - 1)
-                Threads.atomic_add!(Ns_a[i,j], Ns[i,j])
+                if Ns[i,j] != 0
+                    Threads.atomic_add!(Ns_a[i,j], Ns[i,j])
+                end
             end
-            Threads.atomic_add!(Ns_a[i,p+1], Ns[i,end])
+            if Ns[i,end] != 0
+                Threads.atomic_add!(Ns_a[i,p+1], Ns[i,end])
+            end
         end
         end
     end
+
+    print(", copying...")
 
     for i = 1:size(Bs_a)[1]
         Bs_g[i] += Bs_a[i][]
@@ -296,6 +316,9 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
         end
     end
 
+    print(" done")
+
+    return probs[]
 end
 
 function conv_int_unif(r, P, fit, t, beta, alpha)
@@ -408,7 +431,9 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
     numPlots = 0
     for iter = 1:num_iter
 
-        println(iter)
+        print("iteration ", iter)
+
+        iter_start = now()
 
         ##  The expectation step!
         Bs = zeros(p); Zs = zeros(p); Ns = zeros(p, p+1)
@@ -416,7 +441,8 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
         # TODO: set to 0
 
         if length(s.obs) > 0
-            conditional_on_obs!(s, fit, Bs, Zs, Ns)
+            pbs = conditional_on_obs!(s, fit, Bs, Zs, Ns)
+            print(", problems: ", pbs, " (out of ", length(s.obs), ")")
         end
 
         if length(s.cens) > 0 || length(s.int) > 0
@@ -442,17 +468,19 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
         fit = PhaseType(π_next, T_next, t_next)
 
-        if (now() - start) > Dates.Minute(round(timeout))
-            ll = save_progress(name, s, fit, ~test_run, plotMax, iter, start, seed)
-            println("Quitting due to going overtime after $iter iterations.")
-            break
-        end
+        #if (now() - start) > Dates.Minute(round(timeout))
+        #    ll = save_progress(name, s, fit, ~test_run, plotMax, iter, start, seed)
+        #    println("Quitting due to going overtime after $iter iterations.")
+        #    break
+        #end
 
         # Plot each iteration at the beginning
-        saveplot = ~test_run && ((fit.p < 25 && iter % 500 == 0) || (fit.p >= 25 && iter % 100 == 0)) && numPlots < 40
-        numPlots += saveplot
+        #saveplot = ~test_run && (fit.p >= 25 && iter % 100 == 0) && numPlots < 40
+        #numPlots += saveplot
 
-        ll = save_progress(name, s, fit, saveplot, plotMax, iter, start, seed)
+        #ll = save_progress(name, s, fit, saveplot, plotMax, iter, start, seed)
+
+        println(", took ", now() - iter_start, ", (total ", now() - start, ", average ", div(now() - start, iter), ")")
     end
 end
 
