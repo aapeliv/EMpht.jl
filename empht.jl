@@ -275,7 +275,7 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
             for j = 1:(maxj - 1)
                 Threads.atomic_add!(Ns_a[i,j], Ns[i,j])
             end
-            Threads.atomic_add!(Ns_a[i,p+1], Ns[i])
+            Threads.atomic_add!(Ns_a[i,p+1], Ns[i,end])
         end
         end
     end
