@@ -165,17 +165,17 @@ function initial_phasetype(name::String, p::Int, ph_structure::String, continueF
     PhaseType(π, T)
 end
 
-function save_progress(name::String, s::Sample, fit::PhaseType, plotDens::Bool, plotMax::Float64, iter::Integer, start::DateTime, seed::Integer)
-    if fit.p >= 3 || iter % 10 == 0
-        ll = loglikelihoodcensored(s, fit)
+function save_progress(name::String, s::Sample, fit::PhaseType, iter::Integer, start::DateTime, seed::Integer)
+    ll = loglikelihoodcensored(s, fit)
 
-        open(string(name, "_$(seed)_loglikelihood.csv"), "a") do f
-            mins = (now() - start).value / 1000 / 60
-            write(f, "$iter $ll $(round(mins; digits=4))\n")
-        end
-
-        writedlm(string(name, "_$(seed)_fit.csv"), [fit.π fit.T])
+    open(string(name, "_$(seed)_loglikelihood.csv"), "a") do f
+        mins = (now() - start).value / 1000 / 60
+        write(f, "$iter $ll $(round(mins; digits=4))\n")
     end
+
+    writedlm(string(name, "_$(seed)_fit.csv"), [fit.π fit.T])
+
+    return ll
 end
 
 function create_c_integrand(fit, y)
@@ -429,16 +429,13 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
     # Count the total of all weight.
     sumOfWeights = sum(s.obsweight) + sum(s.censweight) + sum(s.intweight)
 
-    # Find the largest of the different samples to set appropriate plot size.
-    plotMax = 1.1 * mapreduce(l -> length(l) > 0 ? maximum(l) : 0, max, (s.obs, s.cens, s.int))
-
     start = now()
 
-    save_progress(name, s, fit, true, plotMax, 0, start, seed)
+    save_progress(name, s, fit, 0, start, seed)
+    last_save = now()
 
     ll = 0
 
-    numPlots = 0
     for iter = 1:num_iter
 
         print("iteration ", iter)
@@ -478,20 +475,19 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
         fit = PhaseType(π_next, T_next, t_next)
 
-        #if (now() - start) > Dates.Minute(round(timeout))
-        #    ll = save_progress(name, s, fit, ~test_run, plotMax, iter, start, seed)
-        #    println("Quitting due to going overtime after $iter iterations.")
-        #    break
-        #end
+        print(", took ", now() - iter_start, ", (total ", now() - start, ", average ", div(now() - start, iter), ")")
 
-        # Plot each iteration at the beginning
-        #saveplot = ~test_run && (fit.p >= 25 && iter % 100 == 0) && numPlots < 40
-        #numPlots += saveplot
+        if now() - last_save > Dates.Second(2)
+            ll = save_progress(name, s, fit, iter, start, seed)
+            last_save = now()
+            println(", ll ", ll)
+        else
+            println()
+        end
 
-        #ll = save_progress(name, s, fit, saveplot, plotMax, iter, start, seed)
-
-        println(", took ", now() - iter_start, ", (total ", now() - start, ", average ", div(now() - start, iter), ")")
     end
+
+    save_progress(name, s, fit, -1, start, seed)
 end
 
 function em(name, p, ph_structure, continueFit, num_iter, timeout, s, seed)
