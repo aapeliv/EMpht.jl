@@ -202,6 +202,11 @@ end
 
 chunk(xs, n) = collect(Iterators.partition(xs, ceil(Int, length(xs)/n)))
 
+function ode_exp!(du::AbstractArray{Float64}, u::AbstractArray{Float64}, fit::PhaseType, t::Float64)
+    # dc = T * C + t * a
+    du[:] = vec(fit.T * reshape(u, fit.p, fit.p))
+end
+
 function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Float64}, Zs_g::AbstractArray{Float64}, Ns_g::AbstractArray{Float64})
     # Setup initial conditions.
     p = fit.p
@@ -210,6 +215,9 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
     # Run the ODE solver.
     prob = ODEProblem(ode_observations!, u0, (0.0, maximum(s.obs)), fit)
     sol = solve(prob, Tsit5())
+
+    exp_prob = ODEProblem(ode_exp!, Matrix{Float64}(I, p, p), (0.0, maximum(s.obs)), fit)
+    exp_sol = solve(exp_prob, Tsit5())
 
     print(", chunking away...")
 
@@ -245,7 +253,9 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
 
             weight = s.obsweight[k]
 
-            expTy = exp(fit.T * s.obs[k])
+            #expTy = exp(fit.T * s.obs[k])
+            expTy = exp_sol(s.obs[k])
+
             a = transpose(fit.π' * expTy)
             b = expTy * fit.t
 
