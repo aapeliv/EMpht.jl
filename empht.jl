@@ -270,6 +270,7 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
                 Ns[:,1:p] = Ns[:,1:p] + weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
                 Ns[:,p+1] = Ns[:,end] + weight * (fit.t .* a) / denom
             end
+        end
 
         for i = 1:size(Bs_a)[1]
             if Bs[i] != 0
@@ -294,7 +295,6 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
             if Ns[i,end] != 0
                 Threads.atomic_add!(Ns_a[i,p+1], Ns[i,end])
             end
-        end
         end
     end
 
