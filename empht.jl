@@ -410,6 +410,10 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
     Ns = zeros(p, p+1)
 
     for iter = 1:num_iter
+        fill!(Bs, 0.0)
+        fill!(Zs, 0.0)
+        fill!(Ns, 0.0)
+
         print("iteration ", iter)
 
         iter_start = now()
