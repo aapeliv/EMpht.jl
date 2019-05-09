@@ -9,7 +9,7 @@ using Statistics
 
 include("phasetype.jl");
 
-BLAS.set_num_threads(1)
+#BLAS.set_num_threads(1)
 
 # Definition of a sample which we fit the phase-type distribution to.
 struct Sample
@@ -456,7 +456,7 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
         print(", took ", now() - iter_start, ", (total ", now() - start, ", average ", div(now() - start, iter), ")")
 
-        if now() - last_save > Dates.Second(2)
+        if now() - last_save > Dates.Second(60)
             ll = save_progress(name, s, fit, iter, start, seed)
             last_save = now()
             println(", ll ", ll)
