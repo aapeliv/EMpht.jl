@@ -206,28 +206,44 @@ chunk(xs, n) = collect(Iterators.partition(xs, ceil(Int, length(xs)/n)))
     du[:] = vec(fit.T * reshape(u, fit.p, fit.p))
 end
 
-@inbounds @views function B(weight::Float64, π::Vector{Float64}, b::Vector{Float64}, denom::Float64)
-    return weight * (π .* b) / denom
-end
+@inbounds @views function inner_loop!(Bs::Vector{Float64}, Zs::Vector{Float64}, Ns::Matrix{Float64}, p::Int64, weight::Float64, C::Matrix{Float64}, fit::PhaseType, a::Matrix{Float64}, b::Matrix{Float64},
+mul_temp::Matrix{Float64},
+denom_temp::Matrix{Float64},
+TbCt_temp::Matrix{Float64},
+π_matrix, t_matrix)
 
-@inbounds @views function Z(weight::Float64, C::Matrix{Float64}, denom::Float64)
-    return weight * diag(C) / denom
-end
 
-@inbounds @views function N1(weight::Float64, T::Matrix{Float64}, C::Matrix{Float64}, p::Int64, denom::Float64)
-    return weight * (T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
-end
+    #denom = fit.π' * b :: Vector{Float64}
+    #Bs[:] .+= weight * (fit.π .* b) / denom
+    #Zs[:] .+= weight * diag(C) / denom
+    #Ns[:,1:p] .+= weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
+    #Ns[:,p+1] .+= weight * (fit.t .* a) / denom
 
-@inbounds @views function N2(weight::Float64, t::Vector{Float64}, a::Vector{Float64}, denom::Float64)
-    return weight * (t .* a) / denom
-end
+    mul!(denom_temp, π_matrix, b)
+    rmul!(denom_temp, 1 / weight)
+    mul!(TbCt_temp, fit.T, transpose(C))
+    mul_temp = denom_temp[1]
+    rmul!(TbCt_temp, mul_temp)
 
-@inbounds @views function inner_loop!(Bs::Vector{Float64}, Zs::Vector{Float64}, Ns::Matrix{Float64}, p::Int64, weight::Float64, C::Matrix{Float64}, fit::PhaseType, a::Vector{Float64}, b::Vector{Float64})
-    denom = fit.π' * b :: Vector{Float64}
-    Bs[:] .+= B(weight, fit.π, b, denom)
-    Zs[:] .+= Z(weight, C, denom)
-    Ns[:,1:p] .+= N1(weight, fit.T, C, p, denom)
-    Ns[:,p+1] .+= N2(weight, fit.t, a, denom)
+    @inbounds @simd for i = 1:p
+        Bs[i] += π_matrix[i] * b[i] / mul_temp
+    end
+
+    @inbounds @simd for i = 1:p
+        Zs[i] += C[i,i] / mul_temp
+    end
+
+    @inbounds for i = 1:p
+        @inbounds @simd for j = 1:p
+            if i != j
+                Ns[i,j] += TbCt_temp[i,j]
+            end
+        end
+    end
+
+    @inbounds @simd for i = 1:p
+        Ns[i,p+1] += t_matrix[i] * a[i] / mul_temp
+    end
 end
 
 function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Array{Vector{Float64}}, Zs_w::Array{Vector{Float64}}, Ns_w::Array{Matrix{Float64}})
@@ -249,13 +265,23 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
 
     print(" done")
 
+    π_matrix = copy(transpose(fit.π[:,:]))::Matrix{Float64} # 1 by p
+    t_matrix = fit.t[:,:]::Matrix{Float64} # p by 1
+
     cc = chunk(1:length(s.obs), workers)
-    Threads.@threads for worker = 1:workers
-    #for worker = 1:workers
+    #Threads.@threads for worker = 1:workers
+    for worker = 1:workers
 
         fill!(Bs_w[worker], 0.0)
         fill!(Zs_w[worker], 0.0)
         fill!(Ns_w[worker], 0.0)
+
+        a = zeros(1,p) # 1 by p
+        b = zeros(p,1) # p by 1
+
+        mul_temp = zeros(1,1)
+        denom_temp = zeros(1,1)
+        TbCt_temp = zeros(p, p)
 
         for k in cc[worker]
             weight = s.obsweight[k]
@@ -263,8 +289,8 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
             #expTy = exp(fit.T * s.obs[k])
             expTy = exp_sol(s.obs[k])::Matrix{Float64}
 
-            a = transpose(fit.π' * expTy)
-            b = expTy * fit.t
+            mul!(a, π_matrix, expTy)
+            mul!(b, expTy, t_matrix)
 
             C = reshape(sol(s.obs[k]), p, p)
 
@@ -279,7 +305,7 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
             if sum(b) == 0.0
                 #println("Ignoring observation with b = 0")
             else
-                inner_loop!(Bs_w[worker], Zs_w[worker], Ns_w[worker], p, weight, C, fit, a, b)
+                inner_loop!(Bs_w[worker], Zs_w[worker], Ns_w[worker], p, weight, C, fit, a, b, mul_temp, denom_temp, TbCt_temp, π_matrix, t_matrix)
             end
         end
     end
