@@ -292,15 +292,15 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
             mul!(a, π_matrix, expTy)
             mul!(b, expTy, t_matrix)
 
-            C = reshape(sol(s.obs[k]), p, p)
+            C = sol(s.obs[k])
 
-
-            if minimum(C) < 0
+            if minimum(C) < 0.0
                 Threads.atomic_add!(probs, 1)
                 #println("C is less than 0... ", s.obs[k], ", ", maximum(C))
                 (C,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
-                C = reshape(C, p, p)
             end
+
+            C = reshape(C, p, p)
 
             if sum(b) == 0.0
                 #println("Ignoring observation with b = 0")
