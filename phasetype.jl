@@ -17,12 +17,12 @@ end
 
 struct PhaseType <: ContinuousUnivariateDistribution
     # Defining properties
-    π # entry probabilities
-    T # transition probabilities
+    π::Array{Float64} # entry probabilities
+    T::Matrix{Float64} # transition probabilities
 
     # Derived properties
-    t # exit probabilities
-    p # number of phases
+    t::Array{Float64} # exit probabilities
+    p::Int64 # number of phases
 
     function PhaseType(π, T, t, p)
         @check_args(PhaseType, all(π .>= zero(π[1])))
