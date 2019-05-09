@@ -500,7 +500,7 @@ function em(settings_filename::String)
     # Read in details for the fit from the settings file.
     name, p, ph_structure, continueFit, num_iter, timeout, s = parse_settings(settings_filename)
 
-    for seed in 1:5
+    for seed in 1:1
         Random.seed!(seed)
         em(name, p, ph_structure, continueFit, num_iter, timeout, s, seed)
     end
