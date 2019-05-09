@@ -32,10 +32,9 @@ struct Sample
     end
 end
 
-function ode_observations!(du::AbstractArray{Float64}, u::AbstractArray{Float64}, fit::PhaseType, t::Float64)
+@inbounds @views function ode_observations!(du::Array{Float64}, u::Array{Float64}, fit::PhaseType, t::Float64)
     # dc = T * C + t * a
-    a = fit.π' * exp(fit.T * t)
-    du[:] = vec(fit.T * reshape(u, fit.p, fit.p) + fit.t * a)
+    du[:] = vec(fit.T * reshape(u, fit.p, fit.p) + fit.t * (fit.π' * exp(fit.T * t)))
 end
 
 function ode_censored!(du::AbstractArray{Float64}, u::AbstractArray{Float64}, fit::PhaseType, t::Float64)
@@ -202,14 +201,39 @@ end
 
 chunk(xs, n) = collect(Iterators.partition(xs, ceil(Int, length(xs)/n)))
 
-function ode_exp!(du::AbstractArray{Float64}, u::AbstractArray{Float64}, fit::PhaseType, t::Float64)
+@inbounds @views function ode_exp!(du::Array{Float64}, u::Array{Float64}, fit::PhaseType, t::Float64)
     # dc = T * C + t * a
     du[:] = vec(fit.T * reshape(u, fit.p, fit.p))
 end
 
-function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Float64}, Zs_g::AbstractArray{Float64}, Ns_g::AbstractArray{Float64})
-    # Setup initial conditions.
+@inbounds @views function B(weight::Float64, π::Vector{Float64}, b::Vector{Float64}, denom::Float64)
+    return weight * (π .* b) / denom
+end
+
+@inbounds @views function Z(weight::Float64, C::Matrix{Float64}, denom::Float64)
+    return weight * diag(C) / denom
+end
+
+@inbounds @views function N1(weight::Float64, T::Matrix{Float64}, C::Matrix{Float64}, p::Int64, denom::Float64)
+    return weight * (T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
+end
+
+@inbounds @views function N2(weight::Float64, t::Vector{Float64}, a::Vector{Float64}, denom::Float64)
+    return weight * (t .* a) / denom
+end
+
+@inbounds @views function inner_loop!(Bs::Vector{Float64}, Zs::Vector{Float64}, Ns::Matrix{Float64}, p::Int64, weight::Float64, C::Matrix{Float64}, fit::PhaseType, a::Vector{Float64}, b::Vector{Float64})
+    denom = fit.π' * b :: Vector{Float64}
+    Bs[:] .+= B(weight, fit.π, b, denom)
+    Zs[:] .+= Z(weight, C, denom)
+    Ns[:,1:p] .+= N1(weight, fit.T, C, p, denom)
+    Ns[:,p+1] .+= N2(weight, fit.t, a, denom)
+end
+
+function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Array{Vector{Float64}}, Zs_w::Array{Vector{Float64}}, Ns_w::Array{Matrix{Float64}})
     p = fit.p
+
+    # Setup initial conditions.
     u0 = zeros(p*p)
 
     # Run the ODE solver.
@@ -221,46 +245,28 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
 
     print(", chunking away...")
 
-    Bs_a = Array{Threads.Atomic{Float64}}(undef, p); Zs_a = Array{Threads.Atomic{Float64}}(undef, p); Ns_a = Array{Threads.Atomic{Float64}}(undef, p, p+1)
-
-    for i = 1:size(Bs_a)[1]
-        Bs_a[i] = Threads.Atomic{Float64}(Bs_g[i])
-    end
-
-    for i = 1:size(Zs_a)[1]
-        Zs_a[i] = Threads.Atomic{Float64}(Zs_g[i])
-    end
-
-    maxi, maxj = size(Ns_a)
-
-    for i = 1:maxi
-        for j = 1:maxj
-            Ns_a[i,j] = Threads.Atomic{Float64}(Ns_g[i,j])
-        end
-    end
-
     probs = Threads.Atomic{Int64}(0)
 
     print(" done")
 
-    Threads.@threads for cc = chunk(1:length(s.obs), Threads.nthreads())
-    #for cc = chunk(1:length(s.obs), Threads.nthreads())
-        #print("x?")
-        Bs = zeros(p); Zs = zeros(p); Ns = zeros(p, p+1)
-        #print(" :)")
+    cc = chunk(1:length(s.obs), workers)
+    Threads.@threads for worker = 1:workers
+    #for worker = 1:workers
 
-        for k in cc
+        fill!(Bs_w[worker], 0.0)
+        fill!(Zs_w[worker], 0.0)
+        fill!(Ns_w[worker], 0.0)
 
+        for k in cc[worker]
             weight = s.obsweight[k]
 
             #expTy = exp(fit.T * s.obs[k])
-            expTy = exp_sol(s.obs[k])
+            expTy = exp_sol(s.obs[k])::Matrix{Float64}
 
             a = transpose(fit.π' * expTy)
             b = expTy * fit.t
 
-            u = sol(s.obs[k])
-            C = reshape(u, p, p)
+            C = reshape(sol(s.obs[k]), p, p)
 
 
             if minimum(C) < 0
@@ -270,63 +276,13 @@ function conditional_on_obs!(s::Sample, fit::PhaseType, Bs_g::AbstractArray{Floa
                 C = reshape(C, p, p)
             end
 
-            denom = fit.π' * b
-
-            if denom == 0
+            if sum(b) == 0.0
                 #println("Ignoring observation with b = 0")
             else
-                Bs[:] = Bs[:] + weight * (fit.π .* b) / denom
-                Zs[:] = Zs[:] + weight * diag(C) / denom
-                Ns[:,1:p] = Ns[:,1:p] + weight * (fit.T .* transpose(C) .* (1 .- Matrix{Float64}(I, p, p))) / denom
-                Ns[:,p+1] = Ns[:,end] + weight * (fit.t .* a) / denom
-            end
-        end
-
-        for i = 1:size(Bs_a)[1]
-            if Bs[i] != 0
-                Threads.atomic_add!(Bs_a[i], Bs[i])
-            end
-        end
-
-        for i = 1:size(Zs_a)[1]
-            if Zs[i] != 0
-                Threads.atomic_add!(Zs_a[i], Zs[i])
-            end
-        end
-
-        maxi, maxj = size(Ns_a)
-
-        for i = 1:maxi
-            for j = 1:(maxj - 1)
-                if Ns[i,j] != 0
-                    Threads.atomic_add!(Ns_a[i,j], Ns[i,j])
-                end
-            end
-            if Ns[i,end] != 0
-                Threads.atomic_add!(Ns_a[i,p+1], Ns[i,end])
+                inner_loop!(Bs_w[worker], Zs_w[worker], Ns_w[worker], p, weight, C, fit, a, b)
             end
         end
     end
-
-    print(", copying...")
-
-    for i = 1:size(Bs_a)[1]
-        Bs_g[i] += Bs_a[i][]
-    end
-
-    for i = 1:size(Zs_a)[1]
-        Zs_g[i] += Zs_a[i][]
-    end
-
-    maxi, maxj = size(Ns_a)
-
-    for i = 1:maxi
-        for j = 1:maxj
-            Ns_g[i,j] += Ns_a[i,j][]
-        end
-    end
-
-    print(" done")
 
     return probs[]
 end
@@ -436,20 +392,43 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
     ll = 0
 
-    for iter = 1:num_iter
+    workers = Threads.nthreads()
 
+    # preallocate
+    Bs_w = Array{Vector{Float64}}(undef, workers);
+    Zs_w = Array{Vector{Float64}}(undef, workers);
+    Ns_w = Array{Matrix{Float64}}(undef, workers);
+
+    for worker in 1:workers
+        Bs_w[worker] = zeros(p)
+        Zs_w[worker] = zeros(p)
+        Ns_w[worker] = zeros(p, p+1)
+    end
+
+    Bs = zeros(p)
+    Zs = zeros(p)
+    Ns = zeros(p, p+1)
+
+    for iter = 1:num_iter
         print("iteration ", iter)
 
         iter_start = now()
 
         ##  The expectation step!
-        Bs = zeros(p); Zs = zeros(p); Ns = zeros(p, p+1)
-
-        # TODO: set to 0
-
         if length(s.obs) > 0
-            pbs = conditional_on_obs!(s, fit, Bs, Zs, Ns)
-            print(", problems: ", pbs, " (out of ", length(s.obs), ")")
+            probs = conditional_on_obs!(fit, s, workers, Bs_w, Zs_w, Ns_w)
+
+            print(", copying...")
+
+            for worker in 1:workers
+                Bs += Bs_w[worker]
+                Zs += Zs_w[worker]
+                Ns += Ns_w[worker]
+            end
+
+            print(" done")
+
+            print(", problems: ", probs, " (out of ", length(s.obs), ")")
         end
 
         if length(s.cens) > 0 || length(s.int) > 0
@@ -462,7 +441,7 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
         t_next = max.(Ns[:,end] ./ Zs, 0)
         t_next[isnan.(t_next)] .= 0
 
-        T_next = zeros(p,p)
+        T_next = zeros(p,p)::Matrix{Float64}
         for i=1:p
             T_next[i,:] = max.(Ns[i,1:end-1] ./ Zs[i], 0)
             T_next[i,isnan.(T_next[i,:])] .= 0
@@ -504,32 +483,7 @@ function em(name, p, ph_structure, continueFit, num_iter, timeout, s, seed)
         rm(string(name, "_$(seed)_fit.csv"), force=true)
     end
 
-    # If we start randomly, give it a go from 3 locations before fully running.
-    if ~continueFit && false
-        fit1 = initial_phasetype(name, p, ph_structure, continueFit, s)
-        fit2 = initial_phasetype(name, p, ph_structure, continueFit, s)
-        fit3 = initial_phasetype(name, p, ph_structure, continueFit, s)
-
-        numStartIter = 30 * (p >= 25) + 100 * (p < 25)
-        ll1 = em_iterate(name, s, fit1, numStartIter, timeout/4, true)
-        ll2 = em_iterate(name, s, fit2, numStartIter, timeout/4, true)
-        ll3 = em_iterate(name, s, fit3, numStartIter, timeout/4, true)
-
-        maxll = maximum([ll1, ll2, ll3])
-        println("Best ll was $maxll out of $([ll1, ll2, ll3])")
-        if ll1 == maxll
-            println("Using first guess")
-            fit = fit1
-        elseif ll2 == maxll
-            println("Using second guess")
-            fit = fit2
-        else
-            println("Using third guess")
-            fit = fit3
-        end
-    else
-        fit = initial_phasetype(name, p, ph_structure, continueFit, s)
-    end
+    fit = initial_phasetype(name, p, ph_structure, continueFit, s)
 
     if p <= 10
         println("first pi is $(fit.π), first T is $(fit.T)\n")
