@@ -7,8 +7,6 @@ using OrdinaryDiffEq
 using Random
 using Statistics
 
-using RecursiveArrayTools
-
 include("phasetype.jl");
 
 #BLAS.set_num_threads(1)
@@ -34,15 +32,9 @@ struct Sample
     end
 end
 
-@inbounds @views function ode_observations!(du::ArrayPartition{Float64,Tuple{Array{Float64,2}}}, u::ArrayPartition{Float64,Tuple{Array{Float64,2}}}, params, t::Float64)
+@inbounds @views function ode_observations!(du::Array{Float64}, u::Array{Float64}, fit::PhaseType, t::Float64)
     # dc = T * C + t * a
-    #du[:] = vec(fit.T * reshape(u, fit.p, fit.p) + fit.t * (fit.π' * exp(fit.T * t)))
-    uM, = u.x
-    duM, = du.x
-    fit, temp = params
-    mul!(temp, fit.t, fit.π' * exp(fit.T * t))
-    mul!(duM, fit.T, uM)
-    duM .+= temp
+    du[:] = vec(fit.T * reshape(u, fit.p, fit.p) + fit.t * (fit.π' * exp(fit.T * t)))
 end
 
 function ode_censored!(du::AbstractArray{Float64}, u::AbstractArray{Float64}, fit::PhaseType, t::Float64)
@@ -209,10 +201,9 @@ end
 
 chunk(xs, n) = collect(Iterators.partition(xs, ceil(Int, length(xs)/n)))
 
-@inbounds @views function ode_exp!(du::ArrayPartition{Float64,Tuple{Array{Float64,2}}}, u::ArrayPartition{Float64,Tuple{Array{Float64,2}}}, fit::PhaseType, t::Float64)
-    uM, = u.x
-    duM, = du.x
-    mul!(duM, fit.T, uM)
+@inbounds @views function ode_exp!(du::Array{Float64}, u::Array{Float64}, fit::PhaseType, t::Float64)
+    # dc = T * C + t * a
+    du[:] = vec(fit.T * reshape(u, fit.p, fit.p))
 end
 
 @inbounds @views function inner_loop!(Bs::Vector{Float64}, Zs::Vector{Float64}, Ns::Matrix{Float64}, p::Int64, weight::Float64, C::Matrix{Float64}, fit::PhaseType, a::Matrix{Float64}, b::Matrix{Float64},
@@ -258,12 +249,14 @@ end
 function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Array{Vector{Float64}}, Zs_w::Array{Vector{Float64}}, Ns_w::Array{Matrix{Float64}})
     p = fit.p
 
+    # Setup initial conditions.
+    u0 = zeros(p*p)
+
     # Run the ODE solver.
-    params = (fit, zeros(p, p))
-    prob = ODEProblem(ode_observations!, ArrayPartition((zeros(p, p))), (0.0, maximum(s.obs)), params)
+    prob = ODEProblem(ode_observations!, u0, (0.0, maximum(s.obs)), fit)
     sol = solve(prob, Tsit5())
 
-    exp_prob = ODEProblem(ode_exp!, ArrayPartition((Matrix{Float64}(I, p, p))), (0.0, maximum(s.obs)), fit)
+    exp_prob = ODEProblem(ode_exp!, Matrix{Float64}(I, p, p), (0.0, maximum(s.obs)), fit)
     exp_sol = solve(exp_prob, Tsit5())
 
     print(", chunking away...")
@@ -276,8 +269,8 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
     t_matrix = fit.t[:,:]::Matrix{Float64} # p by 1
 
     cc = chunk(1:length(s.obs), workers)
-    Threads.@threads for worker = 1:workers
-    #for worker = 1:workers
+    #Threads.@threads for worker = 1:workers
+    for worker = 1:workers
 
         fill!(Bs_w[worker], 0.0)
         fill!(Zs_w[worker], 0.0)
@@ -293,17 +286,26 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
         for k in cc[worker]
             weight = s.obsweight[k]
 
-            mul!(a, π_matrix, exp_sol(s.obs[k]).x[1])
-            mul!(b, exp_sol(s.obs[k]).x[1], t_matrix)
+            #expTy = exp(fit.T * s.obs[k])
+            expTy = exp_sol(s.obs[k])::Matrix{Float64}
 
-            if minimum(sol(s.obs[k]).x[1]) < 0
+            mul!(a, π_matrix, expTy)
+            mul!(b, expTy, t_matrix)
+
+            C = sol(s.obs[k])
+
+            if minimum(C) < 0.0
                 Threads.atomic_add!(probs, 1)
                 #println("C is less than 0... ", s.obs[k], ", ", maximum(C))
-                (D,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
-                D = reshape(D, p, p)
-                inner_loop!(Bs_w[worker], Zs_w[worker], Ns_w[worker], p, weight, D, fit, a, b, mul_temp, denom_temp, TbCt_temp, π_matrix, t_matrix)
+                (C,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
+            end
+
+            C = reshape(C, p, p)
+
+            if sum(b) == 0.0
+                #println("Ignoring observation with b = 0")
             else
-                inner_loop!(Bs_w[worker], Zs_w[worker], Ns_w[worker], p, weight, sol(s.obs[k]).x[1], fit, a, b, mul_temp, denom_temp, TbCt_temp, π_matrix, t_matrix)
+                inner_loop!(Bs_w[worker], Zs_w[worker], Ns_w[worker], p, weight, C, fit, a, b, mul_temp, denom_temp, TbCt_temp, π_matrix, t_matrix)
             end
         end
     end
