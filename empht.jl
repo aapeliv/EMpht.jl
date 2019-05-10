@@ -246,11 +246,13 @@ TbCt_temp::Matrix{Float64},
     end
 end
 
-function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Array{Vector{Float64}}, Zs_w::Array{Vector{Float64}}, Ns_w::Array{Matrix{Float64}}, a_w::Array{Matrix{Float64}}, b_w::Array{Matrix{Float64}}, mul_temp_w::Array{Matrix{Float64}}, denom_temp_w::Array{Matrix{Float64}}, TbCt_temp_w::Array{Matrix{Float64}})
+function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Array{Vector{Float64}}, Zs_w::Array{Vector{Float64}}, Ns_w::Array{Matrix{Float64}})
     p = fit.p
 
+    u0 = zeros(p*p)
+
     # Run the ODE solver.
-    prob = ODEProblem(ode_observations!, zeros(p*p), (0.0, maximum(s.obs)), fit)
+    prob = ODEProblem(ode_observations!, u0, (0.0, maximum(s.obs)), fit)
     sol = solve(prob, Tsit5())
 
     exp_prob = ODEProblem(ode_exp!, Matrix{Float64}(I, p, p), (0.0, maximum(s.obs)), fit)
@@ -268,27 +270,16 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
     cc = chunk(1:length(s.obs), workers)
     Threads.@threads for worker = 1:workers
     #for worker = 1:workers
-        Bs = Bs_w[worker]
-        Zs = Zs_w[worker]
-        Ns = Ns_w[worker]
+        fill!(Bs_w[worker], 0.0)
+        fill!(Zs_w[worker], 0.0)
+        fill!(Ns_w[worker], 0.0)
 
-        a = a_w[worker]
-        b = b_w[worker]
+        a = zeros(1,p) # 1 by p
+        b = zeros(p,1) # p by 1
 
-        mul_temp = mul_temp_w[worker]
-        denom_temp = denom_temp_w[worker]
-        TbCt_temp = TbCt_temp_w[worker]
-
-        fill!(Bs, 0.0)
-        fill!(Zs, 0.0)
-        fill!(Ns, 0.0)
-
-        fill!(a, 0.0)
-        fill!(b, 0.0)
-
-        fill!(mul_temp, 0.0)
-        fill!(denom_temp, 0.0)
-        fill!(TbCt_temp, 0.0)
+        mul_temp = zeros(1,1)
+        denom_temp = zeros(1,1)
+        TbCt_temp = zeros(p, p)
 
         for k in cc[worker]
             weight = s.obsweight[k]
@@ -312,7 +303,7 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
             if sum(b) == 0.0
                 #println("Ignoring observation with b = 0")
             else
-                inner_loop!(Bs, Zs, Ns, p, weight, C, fit, a, b, mul_temp, denom_temp, TbCt_temp, π_matrix, t_matrix)
+                inner_loop!(Bs_w[worker], Zs_w[worker], Ns_w[worker], p, weight, C, fit, a, b, mul_temp, denom_temp, TbCt_temp, π_matrix, t_matrix)
             end
         end
     end
@@ -432,22 +423,10 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
     Zs_w = Array{Vector{Float64}}(undef, workers);
     Ns_w = Array{Matrix{Float64}}(undef, workers);
 
-    a_w = Array{Matrix{Float64}}(undef, workers);
-    b_w = Array{Matrix{Float64}}(undef, workers);
-
-    mul_temp_w = Array{Matrix{Float64}}(undef, workers);
-    denom_temp_w = Array{Matrix{Float64}}(undef, workers);
-    TbCt_temp_w = Array{Matrix{Float64}}(undef, workers);
-
     for worker in 1:workers
         Bs_w[worker] = zeros(p)
         Zs_w[worker] = zeros(p)
         Ns_w[worker] = zeros(p, p+1)
-        a_w[worker] = zeros(1,p) # 1 by p
-        b_w[worker] = zeros(p,1) # p by 1
-        mul_temp_w[worker] = zeros(1,1)
-        denom_temp_w[worker] = zeros(1,1)
-        TbCt_temp_w[worker] = zeros(p, p)
     end
 
     Bs = zeros(p)
@@ -465,7 +444,7 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
         ##  The expectation step!
         if length(s.obs) > 0
-            probs = conditional_on_obs!(fit, s, workers, Bs_w, Zs_w, Ns_w, a_w, b_w, mul_temp_w, denom_temp_w, TbCt_temp_w)
+            probs = conditional_on_obs!(fit, s, workers, Bs_w, Zs_w, Ns_w)
 
             print(", copying...")
 
