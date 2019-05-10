@@ -260,8 +260,8 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
     t_matrix = fit.t[:,:]::Matrix{Float64} # p by 1
 
     cc = chunk(1:length(s.obs), workers)
-    #Threads.@threads for worker = 1:workers
-    for worker = 1:workers
+    Threads.@threads for worker = 1:workers
+    #for worker = 1:workers
         Bs = zeros(p)
         Zs = zeros(p)
         Ns = zeros(p, p+1)
