@@ -479,7 +479,7 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
         print(", took ", now() - iter_start, ", (total ", now() - start, ", average ", div(now() - start, iter), ")")
 
-        if now() - last_save > Dates.Second(60)
+        if now() - last_save > Dates.Second(60 + max(0, p - 5) * 30)
             ll = save_progress(name, s, fit, iter, start, seed)
             last_save = now()
             println(", ll ", ll)
