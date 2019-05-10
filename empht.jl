@@ -243,10 +243,8 @@ end
 function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Array{Vector{Float64}}, Zs_w::Array{Vector{Float64}}, Ns_w::Array{Matrix{Float64}})
     p = fit.p
 
-    u0 = zeros(p*p)
-
     # Run the ODE solver.
-    prob = ODEProblem(ode_observations!, u0, (0.0, maximum(s.obs)), fit)
+    prob = ODEProblem(ode_observations!, zeros(p*p), (0.0, maximum(s.obs)), fit)
     sol = solve(prob, Tsit5())
 
     exp_prob = ODEProblem(ode_exp!, Matrix{Float64}(I, p, p), (0.0, maximum(s.obs)), fit)
@@ -262,11 +260,11 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
     t_matrix = fit.t[:,:]::Matrix{Float64} # p by 1
 
     cc = chunk(1:length(s.obs), workers)
-    Threads.@threads for worker = 1:workers
-    #for worker = 1:workers
-        fill!(Bs_w[worker], 0.0)
-        fill!(Zs_w[worker], 0.0)
-        fill!(Ns_w[worker], 0.0)
+    #Threads.@threads for worker = 1:workers
+    for worker = 1:workers
+        Bs = zeros(p)
+        Zs = zeros(p)
+        Ns = zeros(p, p+1)
 
         a = zeros(1,p) # 1 by p
         b = zeros(p,1) # p by 1
@@ -296,9 +294,13 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
             if sum(b) == 0.0
                 #println("Ignoring observation with b = 0")
             else
-                inner_loop!(Bs_w[worker], Zs_w[worker], Ns_w[worker], p, weight, C, fit, a, b, mul_temp, denom_temp, π_matrix, t_matrix)
+                inner_loop!(Bs, Zs, Ns, p, weight, C, fit, a, b, mul_temp, denom_temp, π_matrix, t_matrix)
             end
         end
+
+        Bs_w[worker] = Bs
+        Zs_w[worker] = Zs
+        Ns_w[worker] = Ns
     end
 
     return probs[]
