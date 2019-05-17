@@ -272,29 +272,31 @@ function conditional_on_obs!(fit::PhaseType, s::Sample, workers::Int64, Bs_w::Ar
         mul_temp = zeros(1,1)
         denom_temp = zeros(1,1)
 
+
+        expTy_temp = zeros(p,p)
+        C_temp = zeros(p,p)
+
         for k in cc[worker]
             weight = s.obsweight[k]
 
             #expTy = exp(fit.T * s.obs[k])
-            expTy = exp_sol(s.obs[k])::Matrix{Float64}
+            exp_sol(expTy_temp, s.obs[k])::Matrix{Float64}
 
-            mul!(a, π_matrix, expTy)
-            mul!(b, expTy, t_matrix)
+            mul!(a, π_matrix, expTy_temp)
+            mul!(b, expTy_temp, t_matrix)
 
-            C = sol(s.obs[k])
+            sol(C_temp, s.obs[k])
 
-            if minimum(C) < 0.0
+            if minimum(C_temp) < 0.0
                 Threads.atomic_add!(probs, 1)
                 #println("C is less than 0... ", s.obs[k], ", ", maximum(C))
-                (C,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
+                (C_temp,err) = hquadrature(create_c_integrand(fit, s.obs[k]), 0, s.obs[k], atol=1e-3, maxevals=500)
             end
-
-            C = reshape(C, p, p)
 
             if sum(b) == 0.0
                 #println("Ignoring observation with b = 0")
             else
-                inner_loop!(Bs, Zs, Ns, p, weight, C, fit, a, b, mul_temp, denom_temp, π_matrix, t_matrix)
+                inner_loop!(Bs, Zs, Ns, p, weight, reshape(C_temp, p, p), fit, a, b, mul_temp, denom_temp, π_matrix, t_matrix)
             end
         end
 
