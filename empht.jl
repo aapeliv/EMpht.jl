@@ -220,23 +220,23 @@ end
     mul_temp = denom_temp[1]
 
     @inbounds @simd for i = 1:p
-        Bs[i] += π_matrix[i] * b[i] / mul_temp
+        @views Bs[i] += π_matrix[i] .* b[i] ./ mul_temp
     end
 
     @inbounds @simd for i = 1:p
-        Zs[i] += C[i,i] / mul_temp
+        @views Zs[i] += C[i,i] ./ mul_temp
     end
 
     @inbounds for i = 1:p
         @inbounds @simd for j = 1:p
             if i != j
-                Ns[i,j] += fit.T[i,j] * C[j,i] / mul_temp
+                @views Ns[i,j] += fit.T[i,j] .* C[j,i] ./ mul_temp
             end
         end
     end
 
     @inbounds @simd for i = 1:p
-        Ns[i,p+1] += t_matrix[i] * a[i] / mul_temp
+        @views Ns[i,p+1] += t_matrix[i] .* a[i] ./ mul_temp
     end
 end
 
