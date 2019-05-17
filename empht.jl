@@ -413,6 +413,10 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
     ll = 0
 
+    ll_check = 0
+    ll_tol = 1e-4
+    ll_check_freq = 100
+
     workers = Threads.nthreads()
 
     # preallocate
@@ -481,12 +485,24 @@ function em_iterate(name, s, fit, num_iter, timeout, test_run, seed)
 
         print(", took ", now() - iter_start, ", (total ", now() - start, ", average ", div(now() - start, iter), ")")
 
-        if now() - last_save > Dates.Second(60 + max(0, p - 5) * 30)
-            ll = save_progress(name, s, fit, iter, start, seed)
-            last_save = now()
-            println(", ll ", ll)
+        if iter % ll_check_freq == 0
+            ll_check_last = ll_check
+            ll_check = save_progress(name, s, fit, iter, start, seed)
+            if abs(ll_check - ll_check_last) < ll_tol
+                println(", Done! Quitting...")
+                save_progress(name, s, fit, iter, start, seed)
+                break
+            else
+                println(", ll ", ll_check)
+            end
         else
-            println()
+            if now() - last_save > Dates.Second(60)
+                ll = save_progress(name, s, fit, iter, start, seed)
+                last_save = now()
+                println(", ll ", ll)
+            else
+                println()
+            end
         end
 
     end
