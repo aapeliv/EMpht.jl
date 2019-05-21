@@ -1,5 +1,6 @@
 # EMpht.jl
-A Julia port of the EMpht.c program, used for fitting Phase-Type distributions via an EM algorithm.
+
+A Julia port of the EMpht.c program, used for fitting Phase-Type distributions via an EM algorithm. Modified for my masters thesis to run in parallel, based on [Patrick Laub's code](https://github.com/Pat-Laub/EMpht.jl). See the [website](https://bitcoin.aapelivuorinen.com/) and the actual [thesis](https://bitcoin.aapelivuorinen.com/thesis.pdf).
 
 The original C — which is available on [Søren Asmussen's website](https://web.archive.org/web/20180617130551/http://home.math.au.dk/asmus/pspapers.html) — is well documented and has a decent performance for phase-type distributions with a small or moderate number of phases. However it is quite slow for when the number of phases is large (>= 20), and the UX is very old-school Unix. 
 
